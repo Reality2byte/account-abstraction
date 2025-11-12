@@ -15,9 +15,14 @@ import "../core/BaseAccount.sol";
  */
 contract Simple7702Account is BaseAccount, IERC165, IERC1271, ERC1155Holder, ERC721Holder {
 
-    // address of entryPoint v0.8
-    function entryPoint() public pure override returns (IEntryPoint) {
-        return IEntryPoint(0x4337084D9E255Ff0702461CF8895CE9E3b5Ff108);
+    IEntryPoint private immutable _entryPoint;
+
+    constructor(IEntryPoint anEntryPoint) {
+        _entryPoint = anEntryPoint;
+    }
+
+    function entryPoint() public view override returns (IEntryPoint) {
+        return _entryPoint;
     }
 
     /**
@@ -32,7 +37,7 @@ contract Simple7702Account is BaseAccount, IERC165, IERC1271, ERC1155Holder, ERC
         return _checkSignature(userOpHash, userOp.signature) ? SIG_VALIDATION_SUCCESS : SIG_VALIDATION_FAILED;
     }
 
-    function isValidSignature(bytes32 hash, bytes memory signature) public view returns (bytes4 magicValue) {
+    function isValidSignature(bytes32 hash, bytes memory signature) public virtual view returns (bytes4 magicValue) {
         return _checkSignature(hash, signature) ? this.isValidSignature.selector : bytes4(0xffffffff);
     }
 
@@ -44,11 +49,15 @@ contract Simple7702Account is BaseAccount, IERC165, IERC1271, ERC1155Holder, ERC
         require(
             msg.sender == address(this) ||
             msg.sender == address(entryPoint()),
-            "not from self or EntryPoint"
+            NotFromEntryPoint(
+                msg.sender,
+                address(this),
+                address(entryPoint())
+            )
         );
     }
 
-    function supportsInterface(bytes4 id) public override(ERC1155Holder, IERC165) pure returns (bool) {
+    function supportsInterface(bytes4 id) public virtual override(ERC1155Holder, IERC165) pure returns (bool) {
         return
             id == type(IERC165).interfaceId ||
             id == type(IAccount).interfaceId ||

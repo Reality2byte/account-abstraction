@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0
 pragma solidity ^0.8.28;
+
 /* solhint-disable avoid-low-level-calls */
+/* solhint-disable gas-calldata-parameters */
 /* solhint-disable no-inline-assembly */
 
 import "../interfaces/IAccount.sol";
@@ -16,18 +18,20 @@ import "./SenderCreator.sol";
 import "./Eip7702Support.sol";
 import "../utils/Exec.sol";
 
-import "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 import "@openzeppelin/contracts/utils/introspection/ERC165.sol";
 import "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 
 /**
- * Account-Abstraction (EIP-4337) singleton EntryPoint v0.8 implementation.
+ * Always verify the EntryPoint addresses across multiple trusted sources.
+ * Visit https://docs.erc4337.io/ for instructions and official documentation.
+ * Account-Abstraction (EIP-4337) singleton EntryPoint v0.9 implementation.
  * Only one instance required on each chain.
  * @custom:security-contact https://bounty.ethereum.org
  */
-contract EntryPoint is IEntryPoint, StakeManager, NonceManager, ReentrancyGuardTransient, ERC165, EIP712 {
+contract EntryPoint is IEntryPoint, StakeManager, NonceManager, ERC165, EIP712 {
 
     using UserOperationLib for PackedUserOperation;
+    using Eip7702Support for address;
 
     /**
      * internal-use constants
@@ -46,19 +50,35 @@ contract EntryPoint is IEntryPoint, StakeManager, NonceManager, ReentrancyGuardT
     // Threshold below which no penalty would be charged
     uint256 private constant PENALTY_GAS_THRESHOLD = 40000;
 
+    uint48 private constant VALIDITY_BLOCK_RANGE_FLAG = 0x800000000000;
+    uint48 private constant VALIDITY_BLOCK_RANGE_MASK = 0x7fffffffffff;
+
     SenderCreator private immutable _senderCreator = new SenderCreator();
 
     string constant internal DOMAIN_NAME = "ERC4337";
     string constant internal DOMAIN_VERSION = "1";
 
+    bytes32 transient private currentUserOpHash;
+
+    error Reentrancy();
+
     constructor() EIP712(DOMAIN_NAME, DOMAIN_VERSION)  {
+    }
+
+    modifier nonReentrant() {
+        require(
+            // solhint-disable avoid-tx-origin
+            tx.origin == msg.sender && msg.sender.code.length == 0,
+            Reentrancy()
+        );
+        _;
     }
 
     /// @inheritdoc IEntryPoint
     function handleOps(
         PackedUserOperation[] calldata ops,
         address payable beneficiary
-    ) external nonReentrant {
+    ) external virtual nonReentrant {
         uint256 opslen = ops.length;
         UserOpInfo[] memory opInfos = new UserOpInfo[](opslen);
         unchecked {
@@ -79,7 +99,7 @@ contract EntryPoint is IEntryPoint, StakeManager, NonceManager, ReentrancyGuardT
     function handleAggregatedOps(
         UserOpsPerAggregator[] calldata opsPerAggregator,
         address payable beneficiary
-    ) external nonReentrant {
+    ) external virtual nonReentrant {
 
         unchecked {
             uint256 opasLen = opsPerAggregator.length;
@@ -144,9 +164,14 @@ contract EntryPoint is IEntryPoint, StakeManager, NonceManager, ReentrancyGuardT
         return
             MessageHashUtils.toTypedDataHash(getDomainSeparatorV4(), userOp.hash(overrideInitCodeHash));
     }
+    /// @inheritdoc IEntryPoint
+    function getCurrentUserOpHash(
+    ) public view returns (bytes32) {
+        return currentUserOpHash;
+    }
 
     /// @inheritdoc IEntryPoint
-    function getSenderAddress(bytes calldata initCode) external {
+    function getSenderAddress(bytes calldata initCode) external virtual {
         address sender = senderCreator().createSender(initCode);
         revert SenderAddressResult(sender);
     }
@@ -157,12 +182,12 @@ contract EntryPoint is IEntryPoint, StakeManager, NonceManager, ReentrancyGuardT
     }
 
     /// @inheritdoc IEntryPoint
-    function delegateAndRevert(address target, bytes calldata data) external {
+    function delegateAndRevert(address target, bytes calldata data) external virtual {
         (bool success, bytes memory ret) = target.delegatecall(data);
         revert DelegateAndRevert(success, ret);
     }
 
-    function getPackedUserOpTypeHash() external pure returns (bytes32) {
+    function getPackedUserOpTypeHash() external virtual pure returns (bytes32) {
         return UserOperationLib.PACKED_USEROP_TYPEHASH;
     }
 
@@ -186,9 +211,10 @@ contract EntryPoint is IEntryPoint, StakeManager, NonceManager, ReentrancyGuardT
      * @param amount      - Amount to transfer.
      */
     function _compensate(address payable beneficiary, uint256 amount) internal virtual {
-        require(beneficiary != address(0), "AA90 invalid beneficiary");
-        (bool success,) = beneficiary.call{value: amount}("");
-        require(success, "AA91 failed send to beneficiary");
+        require(beneficiary != address(0), InvalidBeneficiary(beneficiary));
+        currentUserOpHash = bytes32(0);
+        (bool success, bytes memory ret) = beneficiary.call{value: amount}("");
+        require(success, FailedSendToBeneficiary(beneficiary, amount, ret));
     }
 
     /**
@@ -206,6 +232,7 @@ contract EntryPoint is IEntryPoint, StakeManager, NonceManager, ReentrancyGuardT
     internal virtual
     returns (uint256 collected) {
         uint256 preGas = gasleft();
+        currentUserOpHash = opInfo.userOpHash;
         bytes memory context = _getMemoryBytesFromOffset(opInfo.contextOffset);
         bool success;
         {
@@ -321,7 +348,7 @@ contract EntryPoint is IEntryPoint, StakeManager, NonceManager, ReentrancyGuardT
         UserOpInfo[] memory opInfos,
         address expectedAggregator,
         uint256 opIndexOffset
-    ) internal returns (uint256 opsLen){
+    ) internal virtual returns (uint256 opsLen){
         unchecked {
             opsLen = ops.length;
             for (uint256 i = 0; i < opsLen; i++) {
@@ -377,9 +404,9 @@ contract EntryPoint is IEntryPoint, StakeManager, NonceManager, ReentrancyGuardT
         bytes memory callData,
         UserOpInfo memory opInfo,
         bytes calldata context
-    ) external returns (uint256 actualGasCost) {
+    ) external virtual returns (uint256 actualGasCost) {
         uint256 preGas = gasleft();
-        require(msg.sender == address(this), "AA92 internal call only");
+        require(msg.sender == address(this), InternalFunction());
         MemoryUserOp memory mUserOp = opInfo.mUserOp;
 
         uint256 callGasLimit = mUserOp.callGasLimit;
@@ -441,11 +468,11 @@ contract EntryPoint is IEntryPoint, StakeManager, NonceManager, ReentrancyGuardT
         if (paymasterAndData.length > 0) {
             require(
                 paymasterAndData.length >= UserOperationLib.PAYMASTER_DATA_OFFSET,
-                "AA93 invalid paymasterAndData"
+                InvalidPaymasterData(paymasterAndData.length)
             );
             address paymaster;
             (paymaster, mUserOp.paymasterVerificationGasLimit, mUserOp.paymasterPostOpGasLimit) = UserOperationLib.unpackPaymasterStaticFields(paymasterAndData);
-            require(paymaster != address(0), "AA98 invalid paymaster");
+            require(paymaster != address(0), InvalidPaymaster(paymaster));
             mUserOp.paymaster = paymaster;
         }
     }
@@ -490,13 +517,23 @@ contract EntryPoint is IEntryPoint, StakeManager, NonceManager, ReentrancyGuardT
                     senderCreator().initEip7702Sender{
                             gas: opInfo.mUserOp.verificationGasLimit
                         }(sender, initCode[20 :]);
+                    address delegate = sender._getEip7702Delegate();
+                    emit EIP7702AccountInitialized(opInfo.userOpHash, sender, delegate);
                 }
                 return;
             }
-            if (sender.code.length != 0)
-                revert FailedOp(opIndex, "AA10 sender already constructed");
             if (initCode.length < 20) {
                 revert FailedOp(opIndex, "AA99 initCode too small");
+            }
+            address factory = address(bytes20(initCode[0 : 20]));
+            if (sender.code.length != 0) {
+                // ignoring the initcode for an existing 'sender' contract
+                emit IgnoredInitCode(
+                    opInfo.userOpHash,
+                    sender,
+                    factory
+                );
+                return;
             }
             address sender1 = senderCreator().createSender{
                     gas: opInfo.mUserOp.verificationGasLimit
@@ -507,7 +544,6 @@ contract EntryPoint is IEntryPoint, StakeManager, NonceManager, ReentrancyGuardT
                 revert FailedOp(opIndex, "AA14 initCode must return sender");
             if (sender1.code.length == 0)
                 revert FailedOp(opIndex, "AA15 initCode must create sender");
-            address factory = address(bytes20(initCode[0 : 20]));
             emit AccountDeployed(
                 opInfo.userOpHash,
                 sender,
@@ -628,7 +664,7 @@ contract EntryPoint is IEntryPoint, StakeManager, NonceManager, ReentrancyGuardT
             uint256 pmVerificationGasLimit = mUserOp.paymasterVerificationGasLimit;
             (context, validationData) = _callValidatePaymasterUserOp(opIndex, op, opInfo);
             if (preGas - gasleft() > pmVerificationGasLimit) {
-                revert FailedOp(opIndex, "AA36 over paymasterVerificationGasLimit");
+                revert FailedOp(opIndex, "AA36 over pmVerificationGasLimit");
             }
         }
     }
@@ -637,7 +673,7 @@ contract EntryPoint is IEntryPoint, StakeManager, NonceManager, ReentrancyGuardT
         uint256 opIndex,
         PackedUserOperation calldata op,
         UserOpInfo memory opInfo
-    ) internal returns (bytes memory context, uint256 validationData)  {
+    ) internal virtual returns (bytes memory context, uint256 validationData)  {
         uint256 freePtr = _getFreePtr();
         bytes memory validatePaymasterCall = abi.encodeCall(
             IPaymaster.validatePaymasterUserOp,
@@ -648,7 +684,6 @@ contract EntryPoint is IEntryPoint, StakeManager, NonceManager, ReentrancyGuardT
         bool success;
         uint256 contextLength;
         uint256 contextOffset;
-        uint256 maxContextLength;
         uint256 len;
         assembly ("memory-safe") {
             success := call(paymasterVerificationGasLimit, paymaster, 0, add(validatePaymasterCall, 0x20), mload(validatePaymasterCall), 0, 0)
@@ -666,14 +701,18 @@ contract EntryPoint is IEntryPoint, StakeManager, NonceManager, ReentrancyGuardT
             returndatacopy(freePtr, 0, len)
             validationData := mload(add(freePtr, 32))
             contextOffset := mload(freePtr)
-            maxContextLength := sub(len, 96)
             context := add(freePtr, 64)
             contextLength := mload(context)
         }
 
         unchecked {
-            if (!success || contextOffset != 64 || contextLength + 31 < maxContextLength) {
+            if (!success) {
                 revert FailedOpWithRevert(opIndex, "AA33 reverted", Exec.getReturnData(REVERT_REASON_MAX_LEN));
+            }
+            // for a given 'contextLength', calculate the only valid 'returndatasize' value
+            uint256 expectedReturnDataSize = 96 + ((contextLength + 31) / 32) * 32;
+            if (contextOffset != 64 || len != expectedReturnDataSize) {
+                revert FailedOpWithRevert(opIndex, "AA35 malformed paymaster data", Exec.getReturnData(REVERT_REASON_MAX_LEN));
             }
         }
         finalizeAllocation(freePtr, len);
@@ -692,25 +731,32 @@ contract EntryPoint is IEntryPoint, StakeManager, NonceManager, ReentrancyGuardT
         uint256 paymasterValidationData,
         address expectedAggregator
     ) internal virtual view {
-        (address aggregator, bool outOfTimeRange) = _getValidationData(
+        (address aggregator, bool outOfValidityRange, bool isBlockRange) = _getValidationData(
             validationData
         );
         if (expectedAggregator != aggregator) {
             revert FailedOp(opIndex, "AA24 signature error");
         }
-        if (outOfTimeRange) {
+        if (outOfValidityRange) {
+            if (isBlockRange) {
+                revert FailedOp(opIndex, "AA27 outside valid block range");
+            }
             revert FailedOp(opIndex, "AA22 expired or not due");
         }
         // pmAggregator is not a real signature aggregator: we don't have logic to handle it as address.
         // Non-zero address means that the paymaster fails due to some signature check (which is ok only during estimation).
         address pmAggregator;
-        (pmAggregator, outOfTimeRange) = _getValidationData(
+        (pmAggregator, outOfValidityRange, isBlockRange) = _getValidationData(
             paymasterValidationData
         );
         if (pmAggregator != address(0)) {
             revert FailedOp(opIndex, "AA34 signature error");
         }
-        if (outOfTimeRange) {
+        if (outOfValidityRange) {
+            if (isBlockRange) {
+                revert FailedOp(opIndex, "AA37 paymaster inval block range");
+            }
+            // solhint-disable-next-line gas-small-strings
             revert FailedOp(opIndex, "AA32 paymaster expired or not due");
         }
     }
@@ -719,17 +765,26 @@ contract EntryPoint is IEntryPoint, StakeManager, NonceManager, ReentrancyGuardT
      * Parse validationData into its components.
      * @param validationData - The packed validation data (sigFailed, validAfter, validUntil).
      * @return aggregator the aggregator of the validationData
-     * @return outOfTimeRange true if current time is outside the time range of this validationData.
+     * @return outOfValidityRange true if current time is outside the time range of this validationData.
      */
     function _getValidationData(
         uint256 validationData
-    ) internal virtual view returns (address aggregator, bool outOfTimeRange) {
+    ) internal virtual view returns (address aggregator, bool outOfValidityRange, bool isBlockRange) {
         if (validationData == 0) {
-            return (address(0), false);
+            return (address(0), false, false);
         }
         ValidationData memory data = _parseValidationData(validationData);
-        // solhint-disable-next-line not-rely-on-time
-        outOfTimeRange = block.timestamp > data.validUntil || block.timestamp <= data.validAfter;
+        // using top bit of 'validAfter' and 'validUntil' to indicate block-range instead of time-range
+        if (data.validAfter >= VALIDITY_BLOCK_RANGE_FLAG && data.validUntil >= VALIDITY_BLOCK_RANGE_FLAG) {
+            uint48 validAfterBlock = data.validAfter & VALIDITY_BLOCK_RANGE_MASK;
+            uint48 validUntilBlock = data.validUntil & VALIDITY_BLOCK_RANGE_MASK;
+            outOfValidityRange = block.number > validUntilBlock || block.number <= validAfterBlock;
+            isBlockRange = true;
+        } else {
+            // solhint-disable-next-line not-rely-on-time
+            outOfValidityRange = block.timestamp > data.validUntil || block.timestamp <= data.validAfter;
+            isBlockRange = false;
+        }
         aggregator = data.aggregator;
     }
 
@@ -756,7 +811,7 @@ contract EntryPoint is IEntryPoint, StakeManager, NonceManager, ReentrancyGuardT
         MemoryUserOp memory mUserOp = outOpInfo.mUserOp;
         _copyUserOpToMemory(userOp, mUserOp);
 
-        // getUserOpHash uses temporary allocations, no required after it returns
+        // 'getUserOpHash' uses temporary memory allocation and all data allocated inside can be reused after it returns
         uint256 freePtr = _getFreePtr();
         outOpInfo.userOpHash = getUserOpHash(userOp);
         _restoreFreePtr(freePtr);
@@ -891,7 +946,7 @@ contract EntryPoint is IEntryPoint, StakeManager, NonceManager, ReentrancyGuardT
      */
     function _getUserOpGasPrice(
         MemoryUserOp memory mUserOp
-    ) internal view returns (uint256) {
+    ) internal virtual view returns (uint256) {
         unchecked {
             uint256 maxFeePerGas = mUserOp.maxFeePerGas;
             uint256 maxPriorityFeePerGas = mUserOp.maxPriorityFeePerGas;
@@ -945,7 +1000,7 @@ contract EntryPoint is IEntryPoint, StakeManager, NonceManager, ReentrancyGuardT
         }
     }
 
-    function _getUnusedGasPenalty(uint256 gasUsed, uint256 gasLimit) internal pure returns (uint256) {
+    function _getUnusedGasPenalty(uint256 gasUsed, uint256 gasLimit) internal virtual pure returns (uint256) {
         unchecked {
             if (gasLimit <= gasUsed + PENALTY_GAS_THRESHOLD) {
                 return 0;

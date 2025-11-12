@@ -15,12 +15,12 @@ abstract contract NonceManager is INonceManager {
 
     /// @inheritdoc INonceManager
     function getNonce(address sender, uint192 key)
-    public view override returns (uint256 nonce) {
+    public virtual view override returns (uint256 nonce) {
         return nonceSequenceNumber[sender][key] | (uint256(key) << 64);
     }
 
     /// @inheritdoc INonceManager
-    function incrementNonce(uint192 key) external override {
+    function incrementNonce(uint192 key) external virtual override {
         nonceSequenceNumber[msg.sender][key]++;
     }
 
@@ -30,7 +30,7 @@ abstract contract NonceManager is INonceManager {
      * @return true if the nonce was incremented successfully.
      *         false if the current nonce doesn't match the given one.
      */
-    function _validateAndUpdateNonce(address sender, uint256 nonce) internal returns (bool) {
+    function _validateAndUpdateNonce(address sender, uint256 nonce) internal virtual returns (bool) {
 
         uint192 key = uint192(nonce >> 64);
         uint64 seq = uint64(nonce);

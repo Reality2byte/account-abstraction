@@ -31,6 +31,9 @@ contract SimpleAccount is BaseAccount, TokenCallbackHandler, UUPSUpgradeable, In
         _;
     }
 
+    error NotOwner(address msgSender, address entity, address owner );
+    error NotOwnerOrEntryPoint(address msgSender, address entity, address entryPoint, address owner);
+
     /// @inheritdoc BaseAccount
     function entryPoint() public view virtual override returns (IEntryPoint) {
         return _entryPoint;
@@ -46,7 +49,14 @@ contract SimpleAccount is BaseAccount, TokenCallbackHandler, UUPSUpgradeable, In
 
     function _onlyOwner() internal view {
         // Directly from EOA owner, or through the account itself (which gets redirected through execute())
-        require(msg.sender == owner || msg.sender == address(this), "only owner");
+        require(
+            msg.sender == owner || msg.sender == address(this),
+            NotOwner(
+                msg.sender,
+                address(this),
+                owner
+            )
+        );
     }
 
     /**
@@ -61,12 +71,19 @@ contract SimpleAccount is BaseAccount, TokenCallbackHandler, UUPSUpgradeable, In
 
     function _initialize(address anOwner) internal virtual {
         owner = anOwner;
-        emit SimpleAccountInitialized(_entryPoint, owner);
+        emit SimpleAccountInitialized(entryPoint(), owner);
     }
 
     // Require the function call went through EntryPoint or owner
     function _requireForExecute() internal view override virtual {
-        require(msg.sender == address(entryPoint()) || msg.sender == owner, "account: not Owner or EntryPoint");
+        require(msg.sender == address(entryPoint()) || msg.sender == owner,
+            NotOwnerOrEntryPoint(
+                msg.sender,
+                address(this),
+                address(entryPoint()),
+                owner
+            )
+        );
     }
 
     /// implement template method of BaseAccount
@@ -82,7 +99,7 @@ contract SimpleAccount is BaseAccount, TokenCallbackHandler, UUPSUpgradeable, In
     /**
      * check current account deposit in the entryPoint
      */
-    function getDeposit() public view returns (uint256) {
+    function getDeposit() public virtual view returns (uint256) {
         return entryPoint().balanceOf(address(this));
     }
 
@@ -98,7 +115,7 @@ contract SimpleAccount is BaseAccount, TokenCallbackHandler, UUPSUpgradeable, In
      * @param withdrawAddress target to send to
      * @param amount to withdraw
      */
-    function withdrawDepositTo(address payable withdrawAddress, uint256 amount) public onlyOwner {
+    function withdrawDepositTo(address payable withdrawAddress, uint256 amount) public virtual onlyOwner {
         entryPoint().withdrawTo(withdrawAddress, amount);
     }
 
